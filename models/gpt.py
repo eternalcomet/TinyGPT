@@ -94,15 +94,26 @@ class CausalSelfAttention(nn.Module):
         # (batch_size, n_head, sequence_length, dim_v) x (batch_size, n_head, dim_v, sequence_length)
         # -> (batch_size, n_head, sequence_length, sequence_length)
         if self.flash:
+            # Flash Attention requires dim_k == dim_v, so we use flexattention
+            # TODO: implement flex attention
+            # if self.dim_k != self.dim_v:
+            #     from torch.nn.attention.flex_attention import flex_attention
+
             # efficient attention using Flash Attention CUDA kernels
             y: Tensor = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, is_causal=True)
         else:
             # manual implementation of attention
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:, :, :sequence_length, :sequence_length] == 0, float('-inf'))
-            att = F.softmax(att, dim=-1)
-            att = self.attn_dropout(att)
-            y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+            # note: my implementation, not sure if it's correct
+            score: Tensor = ((q @ k) / math.sqrt(self.dim_k)) # (batch_size, n_head, sequence_length, sequence_length)
+            score = score.masked_fill(self.bias[:, :, :sequence_length, :sequence_length] == 0, float('-inf'))
+            probability = F.softmax(score, dim=-1)
+            y: Tensor = probability @ v 
+            # nanoGPT's implementation, not capable now
+            # att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            # att = att.masked_fill(self.bias[:, :, :sequence_length, :sequence_length] == 0, float('-inf'))
+            # att = F.softmax(att, dim=-1)
+            # att = self.attn_dropout(att)
+            # y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
 
         y: Tensor = (y.transpose(1, 2)  # (batch_size, sequence_length, n_head, dim_v)
                      .contiguous().view(batch_size, sequence_length, self.n_head * self.dim_v))

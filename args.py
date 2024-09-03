@@ -43,7 +43,7 @@ class Args(Tap):
     grad_clip: float = 1.0  # clip gradients at this value, or disable if == 0.0
 
     # learning rate decay settings
-    warmup_iters: int = 2000  # how many steps to warm up for
+    n_warmup_iters: int = 2000  # how many steps to warm up for
     n_train_iters: int = 100000
     n_decay_iters: int = 10000  # should be ~= n_train_iters per Chinchilla
     min_lr: float = 5e-5  # minimum learning rate, should be ~= lr/10 per Chinchilla

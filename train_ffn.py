@@ -227,7 +227,7 @@ get_lr = partial(
     min_lr=args.min_lr,
     n_decay_iters=args.n_decay_iters, 
     n_train_iters=args.n_train_iters, 
-    n_warmup_iters=args.warmup_iters,
+    n_warmup_iters=args.n_warmup_iters,
 )
 
 

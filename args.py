@@ -13,7 +13,7 @@ class Args(Tap):
 
     # wandb logging
     wandb_log: int = 1  # disabled by default
-    wandb_project: str = 'owt'
+    wandb_project: str = 'ffn'
     wandb_run_name: str = 'test'  # 'run' + str(time.time())
 
     # data

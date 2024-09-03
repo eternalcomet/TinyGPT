@@ -238,12 +238,12 @@ if args.wandb_log and master_process:
 
 # training loop
 X, Y = get_batch('train')  # fetch the very first batch
-train_start_time = time.time()
 local_cur_step = 0  # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model  # unwrap DDP container if needed
 running_mfu = -1.0
 
 while True:
+    iter_start_time = time.time()
     # determine and set the learning rate for this iteration
     lr = get_lr(cur_step)
     for param_group in optimizer.param_groups:
@@ -270,7 +270,7 @@ while True:
                     'model_args': model_args,
                     'cur_step': cur_step,
                     'best_val_loss': best_val_loss,
-                    'config': config,
+                    'config': args.as_dict(),
                 }
                 print(f"saving ckpt to {out_dir}")
                 ckpt_path = out_dir / 'ckpt.pt'
@@ -306,23 +306,23 @@ while True:
 
     # timing and logging
     cur_time = time.time()
-    dt = cur_time - train_start_time
-    train_start_time = cur_time
+    iter_time = cur_time - iter_start_time
     if master_process and cur_step % args.log_interval == 0:
         # get loss as float. note: this is a CPU-GPU sync point
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
         lossf = loss.item() * args.grad_accum_steps
         if local_cur_step >= 5:  # let the training loop settle a bit
-            mfu = raw_model.estimate_mfu(args.batch_size * args.grad_accum_steps, dt)
+            mfu = raw_model.estimate_mfu(args.batch_size * args.grad_accum_steps, iter_time)
             running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
-        print(f"[it {cur_step}] loss {lossf:.4f}, time {dt * 1000:.2f}ms, mfu {running_mfu * 100:.2f}%, lr {lr:.3e}")
+        print(f"[it {cur_step}] loss {lossf:.4f}, time {iter_time * 1000:.2f}ms, mfu {running_mfu * 100:.2f}%, lr {lr:.3e}")
         if args.wandb_log:
             wandb.log(
                 {
                     "iter": cur_step,
                     "train/loss": lossf,
                     "lr": lr,
-                    "mfu": running_mfu * 100,  # convert to percentage
+                    "mfu": running_mfu * 100,  # convert to percentage,
+                    "iter_time": iter_time,
                 }
             )
     cur_step += 1

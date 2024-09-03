@@ -5,10 +5,11 @@
 #SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=8
 
+proj_name="kv-merging"
 run_name="vanilla"
 # run_name="tie_kv"
 
-ffn_tie_kv="1"
+ffn_tie_kv="0"
 n_train_iters="50000"
 n_decay_iters="5000"
 n_warmup_iters="1000"
@@ -19,6 +20,8 @@ cmd+=" --ffn_tie_kv ${ffn_tie_kv}"
 cmd+=" --n_train_iters ${n_train_iters}"
 cmd+=" --n_decay_iters ${n_decay_iters}"
 cmd+=" --n_warmup_iters ${n_warmup_iters}"
+cmd+=" --wandb_run_name ${run_name}"
+cmd+=" --wandb_project ${proj_name}"
 
 echo "RUNNING: $cmd"
 

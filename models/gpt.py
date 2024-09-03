@@ -168,7 +168,7 @@ class FFN(nn.Module):
             self.w3 = nn.Linear(d_model, d_mid, bias=False)
         
         if tie_kv:
-            self.w2.weight = self.w1.weight.T
+            self.w2.weight.data = self.w1.weight.data.T
             
         self.act_fn = get_act_fn(act_name)
 

@@ -159,7 +159,7 @@ class TransformerBlock(nn.Module):
         if config.use_mhf:
             self.ffn = MHF(
                 d_model=config.d_model,
-                n_head=config.mhf_n_head,
+                n_head=config.mhf_n_heads,
                 dim_k=config.mhf_dim_k,
                 dim_v=config.mhf_dim_v,
                 tie_kv=config.ffn_tie_kv,

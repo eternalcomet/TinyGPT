@@ -31,7 +31,7 @@ class Args(Tap):
     dropout: float = 0.0  # for pretraining 0 is good, for finetuning try 0.1+
     bias: int = 0  # 0 to turn off bias. Do we use bias inside LayerNorm and Linear layers?
     ffn_tie_kv: int = 0
-    ffn_is_gated: int = 1
+    ffn_is_gated: int = 0
     ffn_d_mid: int = None
     use_mhf: int = 0
     mhf_n_heads: int = 1

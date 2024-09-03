@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from torch.nn import functional as F
+from einops import einsum, rearrange
 
 
 @dataclass
@@ -25,17 +26,20 @@ class GPTConfig:
     n_layer: int = 12
     d_model: int = 768
 
-    # attention
+    # Attention
     n_head: int = 12
     dim_k: int = 64
     dim_v: int = 64
 
     # FFN
-    ffn_merge_kv: bool = False
+    ffn_tie_kv: bool = False
     ffn_is_multihead: bool = False
+    ffn_is_gated: bool = False
+    ffn_act_fn: str = 'silu'
     mhf_n_heads: int = 12
     mhf_dim_k: int = 64
     mhf_dim_v: int = 64
+    mhf_d_mid: int = None
 
     # RMSNorm
     norm_eps: float = 1e-6
@@ -43,6 +47,17 @@ class GPTConfig:
     # deprecated
     bias: bool = True  # True: bias in LinearLayers and LayerNorms, like GPT-2. False: a bit better and faster
     dropout: float = 0.0
+
+
+def get_act_fn(act_name: str):
+    if act_name == 'relu':
+        return F.relu
+    elif act_name == 'silu':
+        return F.silu
+    elif act_name == 'gelu':
+        return F.gelu
+    else:
+        raise ValueError
 
 
 class RMSNorm(torch.nn.Module):
@@ -132,8 +147,10 @@ class CausalSelfAttention(nn.Module):
 
 class FFN(nn.Module):
 
-    def __init__(self, d_model: int, is_gated: bool = True, d_mid: Optional[int] = None, tie_kv: bool = False):
+    def __init__(self, d_model: int, is_gated: bool = True, d_mid: Optional[int] = None, tie_kv: bool = False, act_name: str = 'silu'):
         super().__init__()
+        self.is_gated = is_gated
+        
         if d_mid is None:
             # If not specified, make sure the param count is 8 * d ^ 2
             if is_gated:
@@ -142,20 +159,51 @@ class FFN(nn.Module):
                 d_mid = 4 * d_model
         self.w1 = nn.Linear(d_model, d_mid, bias=False)
         self.w2 = nn.Linear(d_mid, d_model, bias=False)
-        self.w3 = nn.Linear(d_model, d_mid, bias=False)
+        if is_gated:
+            self.w3 = nn.Linear(d_model, d_mid, bias=False)
         
         if tie_kv:
             self.w2.weight = self.w1.weight.T
+            
+        self.act_fn = get_act_fn(act_name)
 
-    def forward(self, x):
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+    def forward(self, x: Tensor) -> Tensor:
+        if is_gated:
+            return self.w2(self.act_fn(self.w1(x)) * self.w3(x))
+        else:
+            return self.w2(self.act_fn(self.w1(x)))
 
 
 class MultiHeadFFN(nn.Module):
-    def __init__(self, d_model: int, n_head: int, dim_k: int, dim_v: int, ):
+    def __init__(self, d_model: int, n_head: int, dim_k: int, dim_v: int, tie_kv: bool = False, d_mid: Optional[int] = None, act_name: str = 'silu'):
         super().__init__()
         
+        if d_mid is None:
+            d_mid = d_model * 3
         
+        total_dim_k = n_head * dim_k
+        total_dim_v = n_head * dim_v
+        self.dim_k = dim_k
+        self.dim_v = dim_v
+
+        self.Wq = nn.Linear(d_model, total_dim_k, bias=False)
+        self.Wo = nn.Linear(total_dim_v, d_model, bias=False)
+        self.K = nn.Parameter(torch.randn(n_head, d_mid, dim_k) * 0.02)
+        self.V = nn.Parameter(torch.randn(n_head, d_mid, dim_v) * 0.02)
+        
+        self.act_fn = get_act_fn(act_name=act_name)
+    
+    def forward(self, x: Tensor) -> Tensor:
+        B, T, D = x.shape
+        Q = self.Wq(x)  # (B, T, H * DK)
+        Q = rearrange(Q, 'b t (h, dk) -> b t h dk')
+        w = einsum(Q, self.K, 'b t h dk, h m dk -> b t h m')
+        w = self.act_fn(w)
+        O = einsum(w, self.V, 'b t h m, h m dv -> b t h dv')
+        O = rearrange(O, 'b t h dv -> b t (h dv)')
+        y = self.Wo(O)  # (b, t, d)
+        return y
+
 
 class TransformerBlock(nn.Module):
 
@@ -165,7 +213,22 @@ class TransformerBlock(nn.Module):
         self.attention = CausalSelfAttention(config.d_model, config.dim_k, config.dim_v,
                                              config.n_head, config.block_size)
         self.ffn_norm = RMSNorm(config.d_model, eps=config.norm_eps)
-        self.ffn = FFN(config.d_model)
+        if config.ffn_is_multihead:
+            self.ffn = MHF(
+                d_model=config.d_model,
+                n_head=config.mhf_n_head,
+                dim_k=config.mhf_dim_k,
+                dim_v=config.mhf_dim_v,
+                tie_kv=config.ffn_tie_kv,
+                d_mid=config.ffn_d_mid,
+            )
+        else:
+            self.ffn = FFN(
+                d_model=config.d_model,
+                tie_kv=config.ffn_tie_kv,
+                d_mid=config.ffn_d_mid,
+                is_gated=config.ffn_is_gated,
+            )
 
     def forward(self, x):
         x = x + self.attention(self.attention_norm(x))

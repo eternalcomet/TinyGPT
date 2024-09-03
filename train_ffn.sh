@@ -6,12 +6,13 @@
 #SBATCH --cpus-per-task=8
 
 proj_name="ffn"
-run_name="vanilla_ng"
+# run_name="vanilla_ng"
 # run_name="tie_kv_ng"
+run_name="mhf"
 
 ffn_is_gated="0"
 ffn_tie_kv="0"
-use_mhf="0"
+use_mhf="1"
 mhf_n_heads="1"
 d_model="256"
 mhf_dim_k="256"

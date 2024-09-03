@@ -19,6 +19,7 @@ from torch.nn import functional as F
 from einops import einsum, rearrange
 
 from .ffn import FFN, MHF
+from .utils import get_act_fn
 
 
 @dataclass
@@ -50,17 +51,6 @@ class GPTConfig:
     # deprecated
     bias: bool = True  # True: bias in LinearLayers and LayerNorms, like GPT-2. False: a bit better and faster
     dropout: float = 0.0
-
-
-def get_act_fn(act_name: str):
-    if act_name == 'relu':
-        return F.relu
-    elif act_name == 'silu':
-        return F.silu
-    elif act_name == 'gelu':
-        return F.gelu
-    else:
-        raise ValueError
 
 
 class RMSNorm(torch.nn.Module):
@@ -159,7 +149,7 @@ class TransformerBlock(nn.Module):
         if config.use_mhf:
             self.ffn = MHF(
                 d_model=config.d_model,
-                n_head=config.mhf_n_heads,
+                n_heads=config.mhf_n_heads,
                 dim_k=config.mhf_dim_k,
                 dim_v=config.mhf_dim_v,
                 tie_kv=config.ffn_tie_kv,

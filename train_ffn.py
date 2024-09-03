@@ -308,14 +308,14 @@ while True:
     cur_time = time.time()
     dt = cur_time - train_start_time
     train_start_time = cur_time
-    if cur_step % args.log_interval == 0 and master_process:
+    if master_process and cur_step % args.log_interval == 0:
         # get loss as float. note: this is a CPU-GPU sync point
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
         lossf = loss.item() * args.grad_accum_steps
         if local_cur_step >= 5:  # let the training loop settle a bit
             mfu = raw_model.estimate_mfu(args.batch_size * args.grad_accum_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
-        print(f"iter {cur_step}: loss {lossf:.4f}, time {dt * 1000:.2f}ms, mfu {running_mfu * 100:.2f}%")
+        print(f"[it {cur_step}] loss {lossf:.4f}, time {dt * 1000:.2f}ms, mfu {running_mfu * 100:.2f}%, lr {lr:.3e}")
         if args.wandb_log:
             wandb.log(
                 {

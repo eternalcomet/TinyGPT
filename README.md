@@ -1,6 +1,6 @@
 # Unified KV
 
-## environment
+## Environment
 
 ```bash
 pip install -r requirements.txt
@@ -12,7 +12,7 @@ sometimes we need:
 export WANDB_MODE=offline
 ```
 
-## dataset
+## Dataset Processing
 
 Run the following code to download openwebtext dataset.
 
@@ -20,7 +20,7 @@ Run the following code to download openwebtext dataset.
 python data/openwebtext/prepare.py
 ```
 
-## run
+## How to run
 
 Use following code to run the train and override settings in the config file specified. **DO NOT** forget `""` between string params.
 
@@ -40,4 +40,12 @@ Then run the command above to sync.
 
 ```bash
 wandb sync wandb/latest-run
+```
+
+## How to Run with SLURM?
+
+Set the arguments in `train_ffn.sh`, and run:
+
+```shell
+sbatch -w g{gpu_node} train_ffn.sh
 ```

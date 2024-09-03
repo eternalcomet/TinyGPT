@@ -2,3 +2,4 @@ numpy
 datasets
 wandb
 torch
+typed-argument-parser

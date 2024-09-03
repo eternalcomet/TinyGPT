@@ -132,8 +132,9 @@ model_args = dict(
     dim_v=args.dim_v,
     ffn_is_gated=bool(args.ffn_is_gated),
     ffn_tie_kv=bool(args.ffn_tie_kv),
-    use_mhf=bool(args.use_mhf),
     ffn_d_mid=args.ffn_d_mid,
+    use_mhf=bool(args.use_mhf),
+    mhf_n_heads=args.mhf_n_heads,
 )  # start with model_args from command line
 
 if args.init_from == 'scratch':

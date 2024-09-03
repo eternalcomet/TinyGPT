@@ -12,3 +12,4 @@ env/
 venv/
 /image/
 /wandb/
+slurm-*.out

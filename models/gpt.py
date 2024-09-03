@@ -33,9 +33,10 @@ class GPTConfig:
 
     # FFN
     ffn_tie_kv: bool = False
-    ffn_is_multihead: bool = False
     ffn_is_gated: bool = False
     ffn_act_fn: str = 'silu'
+    ffn_d_mid: int = None
+    use_mhf: bool = False
     mhf_n_heads: int = 12
     mhf_dim_k: int = 64
     mhf_dim_v: int = 64
@@ -150,6 +151,10 @@ class FFN(nn.Module):
     def __init__(self, d_model: int, is_gated: bool = True, d_mid: Optional[int] = None, tie_kv: bool = False, act_name: str = 'silu'):
         super().__init__()
         self.is_gated = is_gated
+        self.d_mid = d_mid
+        self.tie_kv = tie_kv
+        self.act_name = act_name
+        self.d_model = d_model
         
         if d_mid is None:
             # If not specified, make sure the param count is 8 * d ^ 2
@@ -168,7 +173,7 @@ class FFN(nn.Module):
         self.act_fn = get_act_fn(act_name)
 
     def forward(self, x: Tensor) -> Tensor:
-        if is_gated:
+        if self.is_gated:
             return self.w2(self.act_fn(self.w1(x)) * self.w3(x))
         else:
             return self.w2(self.act_fn(self.w1(x)))
@@ -177,6 +182,13 @@ class FFN(nn.Module):
 class MultiHeadFFN(nn.Module):
     def __init__(self, d_model: int, n_head: int, dim_k: int, dim_v: int, tie_kv: bool = False, d_mid: Optional[int] = None, act_name: str = 'silu'):
         super().__init__()
+        self.d_model = d_model
+        self.d_mid = d_mid
+        self.n_head = n_head
+        self.dim_k = dim_k
+        self.dim_v = dim_v
+        self.tie_kv = tie_kv
+        self.act_name = act_name
         
         if d_mid is None:
             d_mid = d_model * 3
@@ -213,7 +225,7 @@ class TransformerBlock(nn.Module):
         self.attention = CausalSelfAttention(config.d_model, config.dim_k, config.dim_v,
                                              config.n_head, config.block_size)
         self.ffn_norm = RMSNorm(config.d_model, eps=config.norm_eps)
-        if config.ffn_is_multihead:
+        if config.use_mhf:
             self.ffn = MHF(
                 d_model=config.d_model,
                 n_head=config.mhf_n_head,

@@ -135,6 +135,8 @@ model_args = dict(
     ffn_d_mid=args.ffn_d_mid,
     use_mhf=bool(args.use_mhf),
     mhf_n_heads=args.mhf_n_heads,
+    mhf_dim_k=args.mhf_dim_k,
+    mhf_dim_v=args.mhf_dim_v,
 )  # start with model_args from command line
 
 if args.init_from == 'scratch':

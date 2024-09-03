@@ -35,6 +35,8 @@ class Args(Tap):
     ffn_d_mid: int = None
     use_mhf: int = 0
     mhf_n_heads: int = 1
+    mhf_dim_k: int = 256
+    mhf_dim_v: int = 256
 
     # adamw optimizer
     lr: float = 5e-4  # max learning rate

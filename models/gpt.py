@@ -7,6 +7,7 @@ https://github.com/openai/gpt-2/blob/master/src/model.py
 https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py
 """
 
+from typing import Optional
 import math
 import inspect
 from dataclasses import dataclass
@@ -22,12 +23,19 @@ class GPTConfig:
     block_size: int = 1024
     vocab_size: int = 50304  # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
     n_layer: int = 12
-    n_embd: int = 768
+    d_model: int = 768
 
     # attention
     n_head: int = 12
     dim_k: int = 64
     dim_v: int = 64
+
+    # FFN
+    ffn_merge_kv: bool = False
+    ffn_is_multihead: bool = False
+    mhf_n_heads: int = 12
+    mhf_dim_k: int = 64
+    mhf_dim_v: int = 64
 
     # RMSNorm
     norm_eps: float = 1e-6
@@ -53,18 +61,18 @@ class RMSNorm(torch.nn.Module):
 
 class CausalSelfAttention(nn.Module):
 
-    def __init__(self, n_embd: int, dim_k: int, dim_v: int, n_head: int, block_size: int = 4096):
+    def __init__(self, d_model: int, dim_k: int, dim_v: int, n_head: int, block_size: int = 4096):
         super().__init__()
 
-        self.n_embd = n_embd
+        self.d_model = d_model
         self.dim_k = dim_k
         self.dim_v = dim_v
         self.n_head = n_head
 
-        self.w_q = nn.Linear(n_embd, n_head * dim_k, bias=False)
-        self.w_k = nn.Linear(n_embd, n_head * dim_k, bias=False)
-        self.w_v = nn.Linear(n_embd, n_head * dim_v, bias=False)
-        self.w_o = nn.Linear(n_head * dim_v, n_embd, bias=False)
+        self.w_q = nn.Linear(d_model, n_head * dim_k, bias=False)
+        self.w_k = nn.Linear(d_model, n_head * dim_k, bias=False)
+        self.w_v = nn.Linear(d_model, n_head * dim_v, bias=False)
+        self.w_o = nn.Linear(n_head * dim_v, d_model, bias=False)
 
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
@@ -75,7 +83,7 @@ class CausalSelfAttention(nn.Module):
                                  .view(1, 1, block_size, block_size))
 
     def forward(self, x: Tensor):
-        batch_size, sequence_length, n_embd = x.size()  # (batch_size, sequence_length, n_embd)
+        batch_size, sequence_length, d_model = x.size()  # (batch_size, sequence_length, d_model)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q: Tensor = self.w_q(x)  # (batch_size, sequence_length, n_head * dim_k)
@@ -119,32 +127,45 @@ class CausalSelfAttention(nn.Module):
                      .contiguous().view(batch_size, sequence_length, self.n_head * self.dim_v))
 
         # output projection
-        return self.w_o(y)  # (batch_size, sequence_length, n_embd)
+        return self.w_o(y)  # (batch_size, sequence_length, d_model)
 
 
-class FeedForward(nn.Module):
+class FFN(nn.Module):
 
-    def __init__(self, n_embd: int):
+    def __init__(self, d_model: int, is_gated: bool = True, d_mid: Optional[int] = None, tie_kv: bool = False):
         super().__init__()
-        hidden_dim = 4 * n_embd
-        hidden_dim = int(2 * hidden_dim / 3)
-        self.w1 = nn.Linear(n_embd, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, n_embd, bias=False)
-        self.w3 = nn.Linear(n_embd, hidden_dim, bias=False)
+        if d_mid is None:
+            # If not specified, make sure the param count is 8 * d ^ 2
+            if is_gated:
+                d_mid = int(8 * d_model / 3)
+            else:
+                d_mid = 4 * d_model
+        self.w1 = nn.Linear(d_model, d_mid, bias=False)
+        self.w2 = nn.Linear(d_mid, d_model, bias=False)
+        self.w3 = nn.Linear(d_model, d_mid, bias=False)
+        
+        if tie_kv:
+            self.w2.weight = self.w1.weight.T
 
     def forward(self, x):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
 
+class MultiHeadFFN(nn.Module):
+    def __init__(self, d_model: int, n_head: int, dim_k: int, dim_v: int, ):
+        super().__init__()
+        
+        
+
 class TransformerBlock(nn.Module):
 
     def __init__(self, config: GPTConfig):
         super().__init__()
-        self.attention_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
-        self.attention = CausalSelfAttention(config.n_embd, config.dim_k, config.dim_v,
+        self.attention_norm = RMSNorm(config.d_model, eps=config.norm_eps)
+        self.attention = CausalSelfAttention(config.d_model, config.dim_k, config.dim_v,
                                              config.n_head, config.block_size)
-        self.ffn_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
-        self.ffn = FeedForward(config.n_embd)
+        self.ffn_norm = RMSNorm(config.d_model, eps=config.norm_eps)
+        self.ffn = FFN(config.d_model)
 
     def forward(self, x):
         x = x + self.attention(self.attention_norm(x))
@@ -157,11 +178,11 @@ class Transformer(nn.Module):
         super().__init__()
         self.config = config
 
-        self.token_embd = nn.Embedding(config.vocab_size, config.n_embd)
-        self.pos_embd = nn.Embedding(config.block_size, config.n_embd)
+        self.token_embd = nn.Embedding(config.vocab_size, config.d_model)
+        self.pos_embd = nn.Embedding(config.block_size, config.d_model)
         self.layers = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layer)])
-        self.norm = RMSNorm(config.n_embd, eps=config.norm_eps)
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.norm = RMSNorm(config.d_model, eps=config.norm_eps)
+        self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
     def forward(self, input_ids: Tensor, inference=False):
         """
@@ -171,14 +192,14 @@ class Transformer(nn.Module):
         # note: generate position ids: [0, 1, 2, ..., sequence_length-1]
         position_ids = torch.arange(0, sequence_length, dtype=torch.long, device=input_ids.device)
 
-        token_embed = self.token_embd(input_ids)  # (batch_size, sequence_length, n_embd)
-        position_embed = self.pos_embd(position_ids)  # (sequence_length, n_embd)
+        token_embed = self.token_embd(input_ids)  # (batch_size, sequence_length, d_model)
+        position_embed = self.pos_embd(position_ids)  # (sequence_length, d_model)
         # note: despite inconsistent shapes, "broadcasting" will work here.
-        x = token_embed + position_embed  # (batch_size, sequence_length, n_embd)
+        x = token_embed + position_embed  # (batch_size, sequence_length, d_model)
 
         for layer in self.layers:
-            x = layer(x)  # (batch_size, sequence_length, n_embd)
-        x = self.norm(x)  # (batch_size, sequence_length, n_embd)
+            x = layer(x)  # (batch_size, sequence_length, d_model)
+        x = self.norm(x)  # (batch_size, sequence_length, d_model)
 
         if inference:
             # only forward the lm_head on the very last position
@@ -195,13 +216,13 @@ class GPT(nn.Module):
         self.config = config
 
         # self.transformer = nn.ModuleDict(dict(
-        #     wte=nn.Embedding(config.vocab_size, config.n_embd),
-        #     wpe=nn.Embedding(config.block_size, config.n_embd),
+        #     wte=nn.Embedding(config.vocab_size, config.d_model),
+        #     wpe=nn.Embedding(config.block_size, config.d_model),
         #     drop=nn.Dropout(config.dropout),
         #     h=nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layer)]),
-        #     ln_f=LayerNorm(config.n_embd, bias=config.bias),
+        #     ln_f=LayerNorm(config.d_model, bias=config.bias),
         # ))
-        # self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        # self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
         # # with weight tying when using torch.compile() some warnings get generated:
         # # "UserWarning: functional_call was passed multiple values for tied weights.
         # # This behavior is deprecated and will be an error in future versions"
@@ -246,8 +267,8 @@ class GPT(nn.Module):
         # pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
         #
         # # forward the GPT model itself
-        # tok_emb = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
-        # pos_emb = self.transformer.wpe(pos)  # position embeddings of shape (t, n_embd)
+        # tok_emb = self.transformer.wte(idx)  # token embeddings of shape (b, t, d_model)
+        # pos_emb = self.transformer.wpe(pos)  # position embeddings of shape (t, d_model)
         # x = self.transformer.drop(tok_emb + pos_emb)
         # for block in self.transformer.h:
         #     x = block(x)
@@ -282,12 +303,12 @@ class GPT(nn.Module):
         from transformers import GPT2LMHeadModel
         print("loading weights from pretrained gpt: %s" % model_type)
 
-        # n_layer, n_head and n_embd are determined from model_type
+        # n_layer, n_head and d_model are determined from model_type
         config_args = {
-            'gpt2': dict(n_layer=12, n_head=12, n_embd=768),  # 124M params
-            'gpt2-medium': dict(n_layer=24, n_head=16, n_embd=1024),  # 350M params
-            'gpt2-large': dict(n_layer=36, n_head=20, n_embd=1280),  # 774M params
-            'gpt2-xl': dict(n_layer=48, n_head=25, n_embd=1600),  # 1558M params
+            'gpt2': dict(n_layer=12, n_head=12, d_model=768),  # 124M params
+            'gpt2-medium': dict(n_layer=24, n_head=16, d_model=1024),  # 350M params
+            'gpt2-large': dict(n_layer=36, n_head=20, d_model=1280),  # 774M params
+            'gpt2-xl': dict(n_layer=48, n_head=25, d_model=1600),  # 1558M params
         }[model_type]
         print("forcing vocab_size=50257, block_size=1024, bias=True")
         config_args['vocab_size'] = 50257  # always 50257 for GPT model checkpoints
@@ -362,7 +383,7 @@ class GPT(nn.Module):
         # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
         N = self.get_num_params()
         cfg = self.config
-        L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd // cfg.n_head, cfg.block_size
+        L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.d_model // cfg.n_head, cfg.block_size
         flops_per_token = 6 * N + 12 * L * H * Q * T
         flops_per_fwdbwd = flops_per_token * T
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter

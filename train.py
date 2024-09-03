@@ -57,7 +57,7 @@ dim_v = 64
 dropout = 0.0  # for pretraining 0 is good, for finetuning try 0.1+
 bias = False  # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
-learning_rate = 6e-4  # max learning rate
+lr = 6e-4  # max learning rate
 max_iters = 600000  # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
@@ -66,8 +66,9 @@ grad_clip = 1.0  # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True  # whether to decay the learning rate
 warmup_iters = 2000  # how many steps to warm up for
-lr_decay_iters = 600000  # should be ~= max_iters per Chinchilla
-min_lr = 6e-5  # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+n_train_iters = 100000
+n_decay_iters = 10000  # should be ~= max_iters per Chinchilla
+min_lr = 6e-5  # minimum learning rate, should be ~= lr/10 per Chinchilla
 # DDP settings
 backend = 'nccl'  # 'nccl', 'gloo', etc.
 # system
@@ -192,6 +193,8 @@ elif init_from.startswith('gpt2'):
     # read off the created config params, so we can store them into checkpoint correctly
     for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
         model_args[k] = getattr(model.config, k)
+        
+
 # crop down the model block size if desired, using model surgery
 if block_size < model.config.block_size:
     model.crop_block_size(block_size)
@@ -202,7 +205,7 @@ model.to(device)
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # optimizer
-optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
+optimizer = model.configure_optimizers(weight_decay, lr, (beta1, beta2), device_type)
 if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None  # free up memory
@@ -234,20 +237,42 @@ def estimate_loss():
     model.train()
     return out
 
-
-# learning rate decay scheduler (cosine with warmup)
-def get_lr(it):
-    # 1) linear warmup for warmup_iters steps
+# WSD scheduler, linear warmup and cosine decay.
+def get_wsd_lr(it) -> float:
+    # 1) Warmup stage
     if it < warmup_iters:
-        return learning_rate * it / warmup_iters
-    # 2) if it > lr_decay_iters, return min learning rate
+        return lr * it / warmup_iters
+    # 2) Stable stage: if it < n_train_iters - n_decay_iters: return max_lr
+    if it < n_train_iters - n_decay_iters:
+        return lr
+    # 3) Annealing stage
+    if it > n_train_iters - n_decay_iters:
+        decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
+        assert 0 <= decay_ratio <= 1
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
+        return min_lr + coeff * (lr - min_lr)
+    # 4) After annealing
     if it > lr_decay_iters:
         return min_lr
-    # 3) in between, use cosine decay down to min learning rate
-    decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
-    assert 0 <= decay_ratio <= 1
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
-    return min_lr + coeff * (learning_rate - min_lr)
+
+
+# learning rate decay scheduler (cosine with warmup)
+def get_cos_lr(it: int) -> float:
+    # 1) Warmup stage
+    if it < warmup_iters:
+        return lr * it / warmup_iters
+    # 2) Stable stage: if it < n_train_iters - n_decay_iters: return max_lr
+    if it < n_train_iters - n_decay_iters:
+        return lr
+    # 3) Annealing stage
+    if it > n_train_iters - n_decay_iters:
+        decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
+        assert 0 <= decay_ratio <= 1
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
+        return min_lr + coeff * (lr - min_lr)
+    # 4) After annealing
+    if it > lr_decay_iters:
+        return min_lr
 
 
 # logging
@@ -263,9 +288,8 @@ local_iter_num = 0  # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model  # unwrap DDP container if needed
 running_mfu = -1.0
 while True:
-
     # determine and set the learning rate for this iteration
-    lr = get_lr(iter_num) if decay_lr else learning_rate
+    lr = get_lr(iter_num) if decay_lr else lr
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 

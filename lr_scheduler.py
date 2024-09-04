@@ -10,15 +10,14 @@ def get_wsd_lr(it: int, lr: float, min_lr: float, n_decay_iters: int, n_warmup_i
     if it < n_train_iters - n_decay_iters:
         return lr
     # 3) Annealing stage
-    if it > n_train_iters - n_decay_iters:
+    if it < n_train_iters:
         decayed_steps = it - n_train_iters + n_decay_iters
         decay_ratio = decayed_steps / n_decay_iters
         assert 0 <= decay_ratio <= 1
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
         return min_lr + coeff * (lr - min_lr)
     # 4) After annealing
-    if it > n_train_iters:
-        return min_lr
+    return min_lr
 
 
 # learning rate decay scheduler (cosine with warmup)

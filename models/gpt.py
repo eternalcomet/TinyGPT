@@ -19,7 +19,7 @@ from torch.nn import functional as F
 from einops import einsum, rearrange
 
 from .ffn import FFN, MHF
-from .utils import get_act_fn
+from .utils import get_act_fn, RMSNorm
 
 
 @dataclass
@@ -55,20 +55,6 @@ class GPTConfig:
         True  # True: bias in LinearLayers and LayerNorms, like GPT-2. False: a bit better and faster
     )
     dropout: float = 0.0
-
-
-class RMSNorm(torch.nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def _norm(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
-    def forward(self, x):
-        output = self._norm(x.float()).type_as(x)
-        return output * self.weight
 
 
 class CausalSelfAttention(nn.Module):

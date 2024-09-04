@@ -4,7 +4,7 @@ import torch
 from torch import nn, Tensor
 from einops import einsum, rearrange
 
-from .utils import get_act_fn
+from .utils import get_act_fn, RMSNorm
 
 
 class FFN(nn.Module):
@@ -64,6 +64,7 @@ class MHF(nn.Module):
         d_mid: Optional[int] = None,
         use_proj_q: bool = True,
         use_proj_o: bool = True,
+        q_norm: bool = True,
         act_name: str = "silu",
     ):
         super().__init__()
@@ -89,6 +90,7 @@ class MHF(nn.Module):
         self.dim_v = dim_v
         self.use_proj_q = use_proj_q
         self.use_proj_o = use_proj_o
+        self.q_norm = q_norm
 
         if use_proj_q:
             self.Wq = nn.Linear(d_model, total_dim_k, bias=False)

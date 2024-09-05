@@ -203,6 +203,7 @@ scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # optimizer
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
+# scheduler = transformers.get_wsd_schedule(optimizer, num_warmup_steps=warmup_iters, num_stable_steps=lr_decay_iters, num_decay_steps=max_iters)
 if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None  # free up memory
@@ -250,6 +251,24 @@ def get_lr(it):
     return min_lr + coeff * (learning_rate - min_lr)
 
 
+# WSD scheduler, linear warmup and cosine decay.
+def get_wsd_lr(it) -> float:
+    # 1) Warmup stage
+    if it < warmup_iters:
+        return learning_rate * it / warmup_iters
+    # 2) Stable stage: if it < n_train_iters - n_decay_iters: return max_lr
+    if it < max_iters - lr_decay_iters:
+        return learning_rate
+    # 3) Annealing stage
+    if it < max_iters:
+        decayed_steps = it - max_iters + lr_decay_iters
+        decay_ratio = decayed_steps / lr_decay_iters
+        assert 0 <= decay_ratio <= 1
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
+        return min_lr + coeff * (learning_rate - min_lr)
+    # 4) After annealing
+    return min_lr
+
 # logging
 if wandb_log and master_process:
     import wandb
@@ -265,7 +284,7 @@ running_mfu = -1.0
 while True:
 
     # determine and set the learning rate for this iteration
-    lr = get_lr(iter_num) if decay_lr else learning_rate
+    lr = get_wsd_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
@@ -279,7 +298,7 @@ while True:
                 "train/loss": losses['train'],
                 "val/loss": losses['val'],
                 "lr": lr,
-                "mfu": running_mfu * 100,  # convert to percentage
+                # "mfu": running_mfu * 100,  # convert to percentage
             })
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
@@ -331,17 +350,18 @@ while True:
         # get loss as float. note: this is a CPU-GPU sync point
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
         lossf = loss.item() * gradient_accumulation_steps
-        if local_iter_num >= 5:  # let the training loop settle a bit
-            mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
-            running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
-        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt * 1000:.2f}ms, mfu {running_mfu * 100:.2f}%")
+        # if local_iter_num >= 5:  # let the training loop settle a bit
+        #     mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
+        #     running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
+        # print(f"iter {iter_num}: loss {lossf:.4f}, time {dt * 1000:.2f}ms, mfu {running_mfu * 100:.2f}%")
+        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt * 1000:.2f}ms, lr {lr}")
         if wandb_log:
             wandb.log(
                 {
                     "iter": iter_num,
                     "train/loss": lossf,
                     "lr": lr,
-                    "mfu": running_mfu * 100,  # convert to percentage
+                    # "mfu": running_mfu * 100,  # convert to percentage
                 }
             )
     iter_num += 1

@@ -2,7 +2,14 @@ import math
 
 
 # WSD scheduler, linear warmup and cosine decay.
-def get_wsd_lr(it: int, lr: float, min_lr: float, n_decay_iters: int, n_warmup_iters: int, n_train_iters: int) -> float:
+def get_wsd_lr(
+    it: int,
+    lr: float,
+    min_lr: float,
+    n_decay_iters: int,
+    n_warmup_iters: int,
+    n_train_iters: int,
+) -> float:
     # 1) Warmup stage
     if it < n_warmup_iters:
         return lr * it / n_warmup_iters
@@ -21,9 +28,13 @@ def get_wsd_lr(it: int, lr: float, min_lr: float, n_decay_iters: int, n_warmup_i
 
 
 # learning rate decay scheduler (cosine with warmup)
-def get_cos_lr(it: int, lr: float, min_lr: float, n_warmup_iters: int, n_train_iters: int) -> float:
+def get_cos_lr(
+    it: int, lr: float, min_lr: float, n_warmup_iters: int, n_train_iters: int
+) -> float:
     return get_wsd_lr(
         it,
+        lr=lr,
+        min_lr=min_lr,
         n_decay_iters=n_train_iters - n_warmup_iters,
         n_warmup_iters=n_warmup_iters,
         n_train_iters=n_train_iters,

@@ -159,15 +159,15 @@ if os.path.exists(meta_path):
 model_args = dict(
     n_layer=n_layer,
     n_head=n_head,
-    n_embd=n_embd,
-    block_size=block_size,
+    d_model=n_embd,
+    max_len=block_size,
     bias=bias,
     vocab_size=None,
     dropout=dropout,
     dim_k=dim_k,
     dim_v=dim_v,
     ffn_is_gated=True,
-    ffn_is_multihead=False,
+    use_mhf=False,
 )  # start with model_args from command line
 
 if init_from == 'scratch':

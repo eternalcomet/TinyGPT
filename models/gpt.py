@@ -24,7 +24,7 @@ from .utils import get_act_fn, RMSNorm
 
 @dataclass
 class GPTConfig:
-    block_size: int = 1024
+    max_len: int = 1024
     vocab_size: int = (
         50304  # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
     )
@@ -60,7 +60,7 @@ class GPTConfig:
 class CausalSelfAttention(nn.Module):
 
     def __init__(
-        self, d_model: int, dim_k: int, dim_v: int, n_head: int, block_size: int = 4096
+        self, d_model: int, dim_k: int, dim_v: int, n_head: int, max_len: int = 4096
     ):
         super().__init__()
 
@@ -83,8 +83,8 @@ class CausalSelfAttention(nn.Module):
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer(
                 "bias",
-                torch.tril(torch.ones(block_size, block_size)).view(
-                    1, 1, block_size, block_size
+                torch.tril(torch.ones(max_len, max_len)).view(
+                    1, 1, max_len, max_len
                 ),
             )
 
@@ -156,7 +156,7 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.attention_norm = RMSNorm(config.d_model, eps=config.norm_eps)
         self.attention = CausalSelfAttention(
-            config.d_model, config.dim_k, config.dim_v, config.n_head, config.block_size
+            config.d_model, config.dim_k, config.dim_v, config.n_head, config.max_len
         )
         self.ffn_norm = RMSNorm(config.d_model, eps=config.norm_eps)
         if config.use_mhf:
@@ -188,7 +188,7 @@ class Transformer(nn.Module):
         self.config = config
 
         self.token_embd = nn.Embedding(config.vocab_size, config.d_model)
-        self.pos_embd = nn.Embedding(config.block_size, config.d_model)
+        self.pos_embd = nn.Embedding(config.max_len, config.d_model)
         self.layers = nn.ModuleList(
             [TransformerBlock(config) for _ in range(config.n_layer)]
         )
@@ -232,7 +232,7 @@ class GPT(nn.Module):
 
         # self.transformer = nn.ModuleDict(dict(
         #     wte=nn.Embedding(config.vocab_size, config.d_model),
-        #     wpe=nn.Embedding(config.block_size, config.d_model),
+        #     wpe=nn.Embedding(config.max_len, config.d_model),
         #     drop=nn.Dropout(config.dropout),
         #     h=nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layer)]),
         #     ln_f=LayerNorm(config.d_model, bias=config.bias),
@@ -280,7 +280,7 @@ class GPT(nn.Module):
     def forward(self, idx, targets=None):
         # device = idx.device
         # b, t = idx.size()
-        # assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        # assert t <= self.config.max_len, f"Cannot forward sequence of length {t}, block size is only {self.config.max_len}"
         # pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
         #
         # # forward the GPT model itself
@@ -302,19 +302,19 @@ class GPT(nn.Module):
 
         return logits, loss
 
-    def crop_block_size(self, block_size):
+    def crop_max_len(self, max_len):
         # model surgery to decrease the block size if necessary
         # e.g. we may load the GPT2 pretrained model checkpoint (block size 1024)
         # but want to use a smaller block size for some smaller, simpler model
-        assert block_size <= self.config.block_size
-        self.config.block_size = block_size
+        assert max_len <= self.config.max_len
+        self.config.max_len = max_len
         self.transformer.wpe.weight = nn.Parameter(
-            self.transformer.wpe.weight[:block_size]
+            self.transformer.wpe.weight[:max_len]
         )
         for block in self.transformer.h:
             if hasattr(block.attention, "bias"):
                 block.attention.bias = block.attention.bias[
-                    :, :, :block_size, :block_size
+                    :, :, :max_len, :max_len
                 ]
 
     @classmethod
@@ -334,9 +334,9 @@ class GPT(nn.Module):
             "gpt2-large": dict(n_layer=36, n_head=20, d_model=1280),  # 774M params
             "gpt2-xl": dict(n_layer=48, n_head=25, d_model=1600),  # 1558M params
         }[model_type]
-        print("forcing vocab_size=50257, block_size=1024, bias=True")
+        print("forcing vocab_size=50257, max_len=1024, bias=True")
         config_args["vocab_size"] = 50257  # always 50257 for GPT model checkpoints
-        config_args["block_size"] = 1024  # always 1024 for GPT model checkpoints
+        config_args["max_len"] = 1024  # always 1024 for GPT model checkpoints
         config_args["bias"] = True  # always True for GPT model checkpoints
         # we can override the dropout rate, if desired
         if "dropout" in override_args:
@@ -426,7 +426,7 @@ class GPT(nn.Module):
         # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
         N = self.get_num_params()
         cfg = self.config
-        L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.d_model // cfg.n_head, cfg.block_size
+        L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.d_model // cfg.n_head, cfg.max_len
         flops_per_token = 6 * N + 12 * L * H * Q * T
         flops_per_fwdbwd = flops_per_token * T
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
@@ -444,11 +444,11 @@ class GPT(nn.Module):
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
         for _ in range(max_new_tokens):
-            # if the sequence context is growing too long we must crop it at block_size
+            # if the sequence context is growing too long we must crop it at max_len
             idx_cond = (
                 idx
-                if idx.size(1) <= self.config.block_size
-                else idx[:, -self.config.block_size :]
+                if idx.size(1) <= self.config.max_len
+                else idx[:, -self.config.max_len :]
             )
             # forward the model to get the logits for the index in the sequence
             logits, _ = self(idx_cond)

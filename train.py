@@ -28,6 +28,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from models.gpt import GPTConfig, GPT
+from arguments import Args
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -47,32 +48,10 @@ wandb_run_name = 'gpt2'  # 'run' + str(time.time())
 
 # data
 dataset = 'openwebtext'
-gradient_accumulation_steps = 5 * 8  # used to simulate larger batch sizes
-batch_size = 12  # if gradient_accumulation_steps > 1, this is the micro-batch size
-block_size = 1024
+args.grad_accum_steps = 5 * 8  # used to simulate larger batch sizes
+batch_size = 12  # if args.grad_accum_steps > 1, this is the micro-batch size
 
-# model
-n_layer = 12
-n_head = 12
-n_embd = 768
-dim_k = 64
-dim_v = 64
-dropout = 0.0  # for pretraining 0 is good, for finetuning try 0.1+
-bias = False  # do we use bias inside LayerNorm and Linear layers?
-
-# adamw optimizer
-lr = 5e-4  # max learning rate
-weight_decay = 1e-1
-beta1 = 0.9
-beta2 = 0.95
-grad_clip = 1.0  # clip gradients at this value, or disable if == 0.0
-
-# learning rate decay settings
-decay_lr = True  # whether to decay the learning rate
-warmup_iters = 2000  # how many steps to warm up for
-n_train_iters = 100000
-n_decay_iters = 10000  # should be ~= n_train_iters per Chinchilla
-min_lr = 5e-5  # minimum learning rate, should be ~= lr/10 per Chinchilla
+args = Args().parse_args()
 
 # DDP settings
 backend = 'nccl'  # 'nccl', 'gloo', etc.
@@ -100,14 +79,14 @@ if ddp:
     seed_offset = ddp_rank  # each process gets a different seed
     # world_size number of processes will be training simultaneously, so we can scale
     # down the desired gradient accumulation iterations per process proportionally
-    assert gradient_accumulation_steps % ddp_world_size == 0
-    gradient_accumulation_steps //= ddp_world_size
+    assert args.grad_accum_steps % ddp_world_size == 0
+    args.grad_accum_steps //= ddp_world_size
 else:
     # if not ddp, we are running on a single gpu, and one process
     master_process = True
     seed_offset = 0
     ddp_world_size = 1
-tokens_per_iter = gradient_accumulation_steps * ddp_world_size * batch_size * block_size
+tokens_per_iter = args.grad_accum_steps * ddp_world_size * args.batch_size * args.max_len
 print(f"tokens per iteration will be: {tokens_per_iter:,}")
 
 if master_process:
@@ -131,9 +110,9 @@ def get_batch(split):
         data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
     else:
         data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([torch.from_numpy((data[i:i + block_size]).astype(np.int64)) for i in ix])
-    y = torch.stack([torch.from_numpy((data[i + 1:i + 1 + block_size]).astype(np.int64)) for i in ix])
+    ix = torch.randint(len(data) - args.max_len, (args.batch_size,))
+    x = torch.stack([torch.from_numpy((data[i:i + args.max_len]).astype(np.int64)) for i in ix])
+    y = torch.stack([torch.from_numpy((data[i + 1:i + 1 + args.max_len]).astype(np.int64)) for i in ix])
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
@@ -157,17 +136,18 @@ if os.path.exists(meta_path):
 
 # model init
 model_args = dict(
-    n_layer=n_layer,
-    n_head=n_head,
-    d_model=n_embd,
-    max_len=block_size,
-    bias=bias,
+    n_layer=args.n_layer,
+    d_model=args.d_model,
+    max_len=args.max_len,
+    bias=args.bias,
     vocab_size=None,
-    dropout=dropout,
-    dim_k=dim_k,
-    dim_v=dim_v,
-    ffn_is_gated=True,
-    use_mhf=False,
+    dropout=args.dropout,
+    # Attn
+    n_head=args.n_head,
+    dim_k=args.dim_k,
+    dim_v=args.dim_v,
+    ffn_is_gated=args.ffn_is_gated,
+    use_mhf=args.use_mhf,
 )  # start with model_args from command line
 
 if init_from == 'scratch':
@@ -187,7 +167,7 @@ elif init_from == 'resume':
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+    for k in ['n_layer', 'n_head', 'n_embd', 'max_len', 'bias', 'vocab_size']:
         model_args[k] = checkpoint_model_args[k]
     # create the model
     gptconf = GPTConfig(**model_args)
@@ -208,14 +188,14 @@ elif init_from.startswith('gpt2'):
     override_args = dict(dropout=dropout)
     model = GPT.from_pretrained(init_from, override_args)
     # read off the created config params, so we can store them into checkpoint correctly
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+    for k in ['n_layer', 'n_head', 'n_embd', 'max_len', 'bias', 'vocab_size']:
         model_args[k] = getattr(model.config, k)
         
 
 # crop down the model block size if desired, using model surgery
-if block_size < model.config.block_size:
-    model.crop_block_size(block_size)
-    model_args['block_size'] = block_size  # so that the checkpoint will have the right value
+if max_len < model.config.max_len:
+    model.crop_max_len(max_len)
+    model_args['max_len'] = max_len  # so that the checkpoint will have the right value
 model.to(device)
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
@@ -340,16 +320,16 @@ while True:
 
     # forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
-    for micro_step in range(gradient_accumulation_steps):
+    for micro_step in range(args.grad_accum_steps):
         if ddp:
             # in DDP training we only need to sync gradients at the last micro step.
             # the official way to do this is with model.no_sync() context manager, but
             # I really dislike that this bloats the code and forces us to repeat code
             # looking at the source of that context manager, it just toggles this variable
-            model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
+            model.require_backward_grad_sync = (micro_step == args.grad_accum_steps - 1)
         with ctx:
             logits, loss = model(X, Y)
-            loss = loss / gradient_accumulation_steps  # scale the loss to account for gradient accumulation
+            loss = loss / args.grad_accum_steps  # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
@@ -371,9 +351,9 @@ while True:
     if iter_num % log_interval == 0 and master_process:
         # get loss as float. note: this is a CPU-GPU sync point
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
-        lossf = loss.item() * gradient_accumulation_steps
+        lossf = loss.item() * args.grad_accum_steps
         if local_iter_num >= 5:  # let the training loop settle a bit
-            mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
+            mfu = raw_model.estimate_mfu(batch_size * args.grad_accum_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt * 1000:.2f}ms, mfu {running_mfu * 100:.2f}%")
         if wandb_log:

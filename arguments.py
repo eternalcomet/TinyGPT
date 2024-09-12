@@ -20,7 +20,7 @@ class Args(Tap):
     dataset: str = 'openwebtext'
     grad_accum_steps: int = 1 * 8  # used to simulate larger batch sizes
     batch_size: int = 64  # if grad_accum_steps > 1, this is the micro-batch size
-    block_size: int = 1024
+    max_len: int = 1024
 
     # model
     n_layer: int = 6

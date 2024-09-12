@@ -28,10 +28,12 @@ import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
+from transformers import AutoTokenizer
 
 from models.gpt import GPTConfig, GPT
-from args import Args
+from arguments import Args
 from lr_scheduler import get_wsd_lr
+from data.slimpj import get_data
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -65,12 +67,12 @@ else:
     master_process = True
     seed_offset = 0
     ddp_world_size = 1
-    
+
 if master_process:
     print('================ args ================')
     print(args)
     print('======================================')
-tokens_per_iter = args.grad_accum_steps * ddp_world_size * args.batch_size * args.block_size
+tokens_per_iter = args.grad_accum_steps * ddp_world_size * args.batch_size * args.max_len
 print(f"tokens per iteration will be: {tokens_per_iter:,}")
 
 out_dir = Path(args.out_dir)
@@ -88,22 +90,22 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 # poor man's data loader
 data_dir = Path('data', args.dataset)
 
-def get_batch(split):
-    # We recreate np.memmap every batch to avoid a memory leak, as per
-    # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
-    if split == 'train':
-        data = np.memmap(data_dir / 'train.bin', dtype=np.uint16, mode='r')
-    else:
-        data = np.memmap(data_dir / 'val.bin', dtype=np.uint16, mode='r')
-    ix = torch.randint(len(data) - args.block_size, (args.batch_size,))
-    x = torch.stack([torch.from_numpy((data[i:i + args.block_size]).astype(np.int64)) for i in ix])
-    y = torch.stack([torch.from_numpy((data[i + 1:i + 1 + args.block_size]).astype(np.int64)) for i in ix])
-    if device_type == 'cuda':
-        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
-    else:
-        x, y = x.to(device), y.to(device)
-    return x, y
+# def get_batch(split):
+#     # We recreate np.memmap every batch to avoid a memory leak, as per
+#     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
+#     if split == 'train':
+#         data = np.memmap(data_dir / 'train.bin', dtype=np.uint16, mode='r')
+#     else:
+#         data = np.memmap(data_dir / 'val.bin', dtype=np.uint16, mode='r')
+#     ix = torch.randint(len(data) - args.max_len, (args.batch_size,))
+#     x = torch.stack([torch.from_numpy((data[i:i + args.max_len]).astype(np.int64)) for i in ix])
+#     y = torch.stack([torch.from_numpy((data[i + 1:i + 1 + args.max_len]).astype(np.int64)) for i in ix])
+#     if device_type == 'cuda':
+#         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
+#         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+#     else:
+#         x, y = x.to(device), y.to(device)
+#     return x, y
 
 
 # init these up here, can override if init_from='resume' (i.e. from a ckpt)
@@ -124,7 +126,7 @@ model_args = dict(
     n_layer=args.n_layer,
     n_head=args.n_head,
     d_model=args.d_model,
-    block_size=args.block_size,
+    max_len=args.max_len,
     bias=bool(args.bias),
     vocab_size=None,
     dropout=args.dropout,
@@ -182,10 +184,17 @@ elif args.init_from.startswith('gpt2'):
         
 
 # crop down the model block size if desired, using model surgery
-if args.block_size < model.config.block_size:
-    model.crop_block_size(args.block_size)
-    model_args['block_size'] = args.block_size  # so that the ckpt will have the right value
+if args.max_len < model.config.max_len:
+    model.crop_block_size(args.max_len)
+    model_args['block_size'] = args.max_len  # so that the ckpt will have the right value
 model.to(device)
+
+
+tokenizer = AutoTokenizer.from_pretrained('./tokenizer')
+
+tokenized_data = get_data(
+    tokenizer=tokenizer,
+)
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.amp.GradScaler('cuda', enabled=(args.dtype == 'float16'))
@@ -240,6 +249,14 @@ if args.wandb_log and master_process:
     wandb.init(project=args.wandb_project, name=args.wandb_run_name, config=args.as_dict())
 
 # training loop
+train_data_it = iter(tokenized_data['train'])
+val_dta_it = iter(tokenized_data['validation'])
+
+for batch in train_data_it:
+    print(batch)
+    exit()
+exit()
+
 X, Y = get_batch('train')  # fetch the very first batch
 local_cur_step = 0  # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model  # unwrap DDP container if needed
